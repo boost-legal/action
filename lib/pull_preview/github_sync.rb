@@ -13,12 +13,9 @@ module PullPreview
     def self.run(app_path, opts)
       github_event_name = ENV.fetch("GITHUB_EVENT_NAME")
       PullPreview.logger.debug "github_event_name = #{github_event_name.inspect}"
-
-      if ["schedule"].include?(github_event_name)
-        clear_dangling_deployments(ENV.fetch("GITHUB_REPOSITORY"), app_path, opts)
-        clear_outdated_environments(ENV.fetch("GITHUB_REPOSITORY"), app_path, opts)
-        return
-      end
+      
+      clear_dangling_deployments(ENV.fetch("GITHUB_REPOSITORY"), app_path, opts)
+      clear_outdated_environments(ENV.fetch("GITHUB_REPOSITORY"), app_path, opts)
 
       github_event_path = ENV.fetch("GITHUB_EVENT_PATH")
       # https://developer.github.com/v3/activity/events/types/#pushevent
@@ -59,9 +56,11 @@ module PullPreview
           fake_github_context.organization = pr.base.repo.owner
         end
         if pr_issue.state == "closed"
-          PullPreview.logger.warn "[clear_dangling_deployments] Found dangling #{label} label for PR##{pr.number}. Cleaning up..."
+          PullPreview.logger.warn "[clear_dangling_deployments] Found dangling #{label} label for PR##{pr.number}. Removing label..."
+          octokit.remove_label(repo, pr.number, label)
         elsif pr_expired?(pr_issue.updated_at, ttl)
-          PullPreview.logger.warn "[clear_dangling_deployments] Found #{label} label for expired PR##{pr.number} (#{pr_issue.updated_at}). Cleaning up..."
+          PullPreview.logger.warn "[clear_dangling_deployments] Found #{label} label for expired PR##{pr.number} (#{pr_issue.updated_at}). Removing label..."
+          octokit.remove_label(repo, pr.number, label)
         else
           PullPreview.logger.warn "[clear_dangling_deployments] Found #{label} label for active PR##{pr.number} (#{pr_issue.updated_at}). Not touching."
           next
@@ -107,6 +106,7 @@ module PullPreview
         )
       end
       deploys.each do |deployment|
+        PullPreview.logger.warn "[destroy_environment] Found #{deployment.url}. Destroying..."
         PullPreview.octokit.delete(deployment.url)
       end
       # This requires repository permission, which the GitHub Action token cannot get, so cannot delete the environment unfortunately
