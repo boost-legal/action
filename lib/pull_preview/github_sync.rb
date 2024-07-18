@@ -14,8 +14,10 @@ module PullPreview
       github_event_name = ENV.fetch("GITHUB_EVENT_NAME")
       PullPreview.logger.debug "github_event_name = #{github_event_name.inspect}"
 
-      if github_event_name == "schedule"
-        return clear_dangling_deployments(ENV.fetch("GITHUB_REPOSITORY"), app_path, opts)
+      if ["schedule"].include?(github_event_name)
+        clear_dangling_deployments(ENV.fetch("GITHUB_REPOSITORY"), app_path, opts)
+        clear_outdated_environments(ENV.fetch("GITHUB_REPOSITORY"), app_path, opts)
+        return
       end
 
       github_event_path = ENV.fetch("GITHUB_EVENT_PATH")
@@ -70,23 +72,47 @@ module PullPreview
       PullPreview.logger.info "[clear_dangling_deployments] end"
     end
 
-    def self.clear_deployments_for(repo, environment, force: false)
+    # Clear any outdated environments, which have no corresponding PR anymore.
+    def self.clear_outdated_environments(repo, app_path, opts)
+      label = opts[:label]
+      environments_to_remove = Set.new
+      pr_numbers_with_label_assigned = PullPreview.octokit.get("repos/#{repo}/issues", labels: label, pulls: true, state: "all", per_page: 100).map(&:number)
+      PullPreview.octokit.list_environments(repo, per_page: 100).environments.each do |env|
+        # regexp must match `pr-`. We don't want to destroy branch environments (`branch-`)
+        environment = env.name
+        pr_number = environment.match(/gh\-(\d+)\-pr\-(\d+)/)&.captures&.last.to_i
+        next if pr_number.zero?
+        # don't do anything if the corresponding PR still has the label
+        next if pr_numbers_with_label_assigned.include?(pr_number)
+        environments_to_remove.add environment
+      end
+
+      PullPreview.logger.warn "[clear_outdated_environments] Found #{environments_to_remove.size} environments to remove: #{environments_to_remove}."
+
+      environments_to_remove.each do |environment|
+        PullPreview.logger.warn "[clear_outdated_environments] Deleting environment #{environment}..."
+        destroy_environment(repo, environment)
+        sleep 5
+      end
+    end
+
+    def self.destroy_environment(repo, environment)
       deploys = PullPreview.octokit.list_deployments(repo, environment: environment, per_page: 100)
-      if force
-        # make sure all deploys are marked as inactive first
-        deploys.each do |deployment|
-          PullPreview.octokit.create_deployment_status(
-            deployment.url,
-            "inactive",
-            headers: { accept: "application/vnd.github.ant-man-preview+json" }
-          )
-        end
+      # make sure all deploys are marked as inactive first
+      deploys.each do |deployment|
+        PullPreview.octokit.create_deployment_status(
+          deployment.url,
+          "inactive",
+          headers: { accept: "application/vnd.github.ant-man-preview+json" }
+        )
       end
       deploys.each do |deployment|
         PullPreview.octokit.delete(deployment.url)
       end
+      # This requires repository permission, which the GitHub Action token cannot get, so cannot delete the environment unfortunately
+      # PullPreview.octokit.delete_environment(repo, environment)
     rescue => e
-      PullPreview.logger.warn "Unable to clear deployments for environment #{environment.inspect}: #{e.message}"
+      PullPreview.logger.warn "Unable to destroy environment #{environment.inspect}: #{e.message}"
     end
 
     def initialize(github_context, app_path, opts = {})
@@ -143,7 +169,7 @@ module PullPreview
         tags = default_instance_tags.push(*opts[:tags]).uniq
         instance = Up.run(
           app_path,
-          opts.merge(name: instance_name, subdomain: instance_subdomain, tags: tags)
+          opts.merge(name: instance_name, subdomain: instance_subdomain, tags: tags, admins: expanded_admins)
         )
         update_github_status(:deployed, instance.url)
       else
@@ -238,7 +264,7 @@ module PullPreview
         PullPreview.logger.info "Setting deployment status for repo=#{repo.inspect}, branch=#{branch.inspect}, sha=#{sha.inspect}, status=#{deployment_status.inspect}, params=#{deployment_status_params.inspect}"
         octokit.create_deployment_status(deployment.url, deployment_status.to_s, deployment_status_params)
         if status == :destroyed
-          self.class.clear_deployments_for(repo, instance_name)
+          self.class.destroy_environment(repo, instance_name)
         end
       end
     end
@@ -301,6 +327,16 @@ module PullPreview
       else
         ref.sub("refs/heads/", "")
       end
+    end
+
+    def expanded_admins
+      collaborators_with_push = "@collaborators/push"
+      admins = opts[:admins].dup.map(&:strip)
+      if admins.include?(collaborators_with_push)
+        admins.delete(collaborators_with_push)
+        admins.push(*octokit.collaborators(repo).select{|c| c.permissions&.push}.map(&:login))
+      end
+      admins.uniq
     end
 
     def deployment
@@ -405,7 +441,7 @@ module PullPreview
         components = []
         components.push(deployment_variant) if deployment_variant
         components.push(*["pr", pr_number]) if pr_number
-        components.push(branch)
+        components.push(branch.split("/").last)
         Instance.normalize_name(components.join("-"))
       end
     end

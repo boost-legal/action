@@ -1,5 +1,5 @@
-name: "PullPreview - Preview deployments made simple"
-description: "Get automated preview deployments of your app for every pull request. Just using Docker Compose. In your AWS account."
+name: "Preview Environments for GitHub"
+description: "Ephemeral preview deployments of your app for every pull request. Just using Docker Compose. In your AWS account."
 author: "Cyril Rohr"
 branding:
   icon: anchor
@@ -24,7 +24,7 @@ inputs:
   admins:
     description: "Logins of GitHub users that will have their SSH key installed on the instance, comma-separated"
     required: false
-    default: ""
+    default: "@collaborators/push"
   ports:
     description: "Ports to open for external access on the preview server (port 22 is always open), comma-separated"
     required: false
@@ -41,6 +41,10 @@ inputs:
     description: "Compose files to use when running docker-compose up, comma-separated"
     required: false
     default: "docker-compose.yml"
+  compose_options:
+    description: "Additional options to pass to docker-compose up, comma-separated"
+    required: false
+    default: "--build"
   license:
     description: "PullPreview license"
     required: false
@@ -86,6 +90,8 @@ runs:
     - "${{ inputs.cidrs }}"
     - "--compose-files"
     - "${{ inputs.compose_files }}"
+    - "--compose-options"
+    - "${{ inputs.compose_options }}"
     - "--dns"
     - "${{ inputs.dns }}"
     - "--label"
